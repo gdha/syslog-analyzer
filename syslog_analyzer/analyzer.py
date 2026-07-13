@@ -7,6 +7,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .allowlist import is_allowlisted
 from .logs import default_log_paths, read_log_lines
 from .patterns import (
     SEVERITY_ORDER,
@@ -95,11 +96,13 @@ def analyze_paths(
     *,
     include_info: bool = False,
     min_severity: str = "low",
+    allowlist_patterns: list[str] | None = None,
 ) -> AnalysisReport:
     report = AnalysisReport()
     min_rank = SEVERITY_ORDER[min_severity]
     seen_serious: set[tuple[str, str, str]] = set()
     seen_security: set[tuple[str, str, str]] = set()
+    user_allowlist = allowlist_patterns or []
 
     for raw_path in paths:
         path = Path(raw_path)
@@ -129,6 +132,10 @@ def analyze_paths(
             host = _parse_host(line)
             if host and report.host is None:
                 report.host = host
+
+            # Skip lines matched by user allowlist
+            if user_allowlist and is_allowlisted(line, user_allowlist):
+                continue
 
             serious_hit = _first_match(line, SERIOUS_PATTERNS)
             if serious_hit:

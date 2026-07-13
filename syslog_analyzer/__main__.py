@@ -6,6 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from .allowlist import DEFAULT_ALLOWLIST_PATH, init_allowlist, load_allowlist
 from .analyzer import analyze_paths
 from .logs import default_log_paths, resolve_log_paths
 from .patterns import DEFAULT_LOG_PATHS
@@ -61,8 +62,33 @@ def main(argv: list[str] | None = None) -> int:
         metavar="N",
         help="Limit rotated archives per log (e.g. 2 → active + .1 + .2.gz)",
     )
+    parser.add_argument(
+        "--allowlist",
+        metavar="FILE",
+        default=None,
+        help=(
+            "Path to a custom allowlist file with suppression patterns "
+            f"(default: {DEFAULT_ALLOWLIST_PATH})"
+        ),
+    )
+    parser.add_argument(
+        "--allowlist-init",
+        action="store_true",
+        help="Create the default allowlist file with example content, then exit",
+    )
 
     args = parser.parse_args(argv)
+
+    # Handle --allowlist-init early exit
+    if args.allowlist_init:
+        created = init_allowlist()
+        print(f"Allowlist file ready at: {created}")
+        return 0
+
+    # Load user allowlist patterns
+    allowlist_path = Path(args.allowlist) if args.allowlist else None
+    allowlist_patterns = load_allowlist(allowlist_path)
+
     include_rotated = not args.no_rotated
 
     if args.paths:
@@ -81,6 +107,7 @@ def main(argv: list[str] | None = None) -> int:
         paths,
         include_info=args.include_info,
         min_severity=args.min_severity,
+        allowlist_patterns=allowlist_patterns,
     )
 
     if args.json:
