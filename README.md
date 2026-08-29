@@ -114,4 +114,5 @@ make build-exe
 ./dist/syslog-analyzer --help
 ```
 
-The compiled executable is written to `dist/syslog-analyzer`.
+The Makefile creates an isolated `.build-venv` virtual environment for the
+build toolchain and writes the compiled executable to `dist/syslog-analyzer`.
