@@ -1,2 +1,7 @@
 *.txt
 syslog_analyzer/__pycache__/*
+build/
+dist/
+*.spec
+.build-venv/
+*.egg-info/

@@ -106,3 +106,13 @@ Default location: `~/.config/syslog-analyzer/allowlist.conf`
 pip install -e .
 syslog-analyzer
 ```
+
+## Build a standalone executable
+
+```bash
+make build-exe
+./dist/syslog-analyzer --help
+```
+
+The Makefile creates an isolated `.build-venv` virtual environment for the
+build toolchain and writes the compiled executable to `dist/syslog-analyzer`.
