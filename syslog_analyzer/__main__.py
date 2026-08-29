@@ -6,11 +6,15 @@ import argparse
 import sys
 from pathlib import Path
 
-from .allowlist import DEFAULT_ALLOWLIST_PATH, init_allowlist, load_allowlist
-from .analyzer import analyze_paths
-from .logs import default_log_paths, resolve_log_paths
-from .patterns import DEFAULT_LOG_PATHS
-from .report import format_json, format_text
+from syslog_analyzer.allowlist import (
+    DEFAULT_ALLOWLIST_PATH,
+    init_allowlist,
+    load_allowlist,
+)
+from syslog_analyzer.analyzer import analyze_paths
+from syslog_analyzer.logs import default_log_paths, resolve_log_paths
+from syslog_analyzer.patterns import DEFAULT_LOG_PATHS
+from syslog_analyzer.report import format_json, format_text
 
 
 def main(argv: list[str] | None = None) -> int:
