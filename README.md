@@ -106,3 +106,12 @@ Default location: `~/.config/syslog-analyzer/allowlist.conf`
 pip install -e .
 syslog-analyzer
 ```
+
+## Build a standalone executable
+
+```bash
+make build-exe
+./dist/syslog-analyzer --help
+```
+
+The compiled executable is written to `dist/syslog-analyzer`.
