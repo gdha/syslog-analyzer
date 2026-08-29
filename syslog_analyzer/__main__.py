@@ -19,6 +19,7 @@ from syslog_analyzer.report import format_json, format_text
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
+        prog="syslog-analyzer",
         description="Scan system logs for serious errors and security-related activity.",
     )
     parser.add_argument(
