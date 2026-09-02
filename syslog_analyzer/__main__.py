@@ -36,12 +36,18 @@ def _default_run_log_path() -> Path:
     return Path(f"/var/log/syslog-analyzer-{date.today():%F}")
 
 
-def _write_run_log(path: Path, body: str) -> None:
+def _write_run_log(path: Path, body: str) -> Path:
     stamp = datetime.now().isoformat(timespec="seconds")
-    with path.open("a", encoding="utf-8") as fh:
-        fh.write(f"\n=== {stamp} ===\n")
-        fh.write(body)
-        fh.write("\n")
+    for candidate in (path, Path.cwd() / path.name):
+        try:
+            with candidate.open("a", encoding="utf-8") as fh:
+                fh.write(f"\n=== {stamp} ===\n")
+                fh.write(body)
+                fh.write("\n")
+            return candidate
+        except OSError:
+            continue
+    raise OSError(f"Could not write run log to {path} or {Path.cwd() / path.name}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -160,7 +166,12 @@ def main(argv: list[str] | None = None) -> int:
         print(body)
 
     try:
-        _write_run_log(_default_run_log_path(), body)
+        written_path = _write_run_log(_default_run_log_path(), body)
+        if written_path.parent != Path("/var/log"):
+            print(
+                f"Warning: /var/log not writable, wrote run log to {written_path}",
+                file=sys.stderr,
+            )
     except OSError as exc:
         print(f"Warning: could not write run log: {exc}", file=sys.stderr)
 

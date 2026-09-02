@@ -60,6 +60,8 @@ Each run is also appended to a daily run log at:
 
 `/var/log/syslog-analyzer-YYYY-MM-DD`
 
+If `/var/log` is not writable, it falls back to `./syslog-analyzer-YYYY-MM-DD`.
+
 ## False-positive suppression (allowlist)
 
 Some log lines contain keywords like `critical`, `error`, or `fatal` in a purely
