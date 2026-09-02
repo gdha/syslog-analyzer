@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from syslog_analyzer.allowlist import (
@@ -15,6 +16,32 @@ from syslog_analyzer.analyzer import analyze_paths
 from syslog_analyzer.logs import default_log_paths, resolve_log_paths
 from syslog_analyzer.patterns import DEFAULT_LOG_PATHS
 from syslog_analyzer.report import format_json, format_text
+
+
+def _parse_since(value: str) -> date:
+    lowered = value.lower()
+    if lowered == "today":
+        return date.today()
+    if lowered == "yesterday":
+        return date.today() - timedelta(days=1)
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "--since must be 'today', 'yesterday', or in YYYY-MM-DD format"
+        ) from exc
+
+
+def _default_run_log_path() -> Path:
+    return Path(f"/var/log/syslog-analyzer-{date.today():%F}")
+
+
+def _write_run_log(path: Path, body: str) -> None:
+    stamp = datetime.now().isoformat(timespec="seconds")
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(f"\n=== {stamp} ===\n")
+        fh.write(body)
+        fh.write("\n")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -81,6 +108,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Create the default allowlist file with example content, then exit",
     )
+    parser.add_argument(
+        "--since",
+        type=_parse_since,
+        metavar="WHEN",
+        help="Analyze only entries since: today, yesterday, or YYYY-MM-DD",
+    )
 
     args = parser.parse_args(argv)
 
@@ -113,6 +146,7 @@ def main(argv: list[str] | None = None) -> int:
         include_info=args.include_info,
         min_severity=args.min_severity,
         allowlist_patterns=allowlist_patterns,
+        since=args.since,
     )
 
     if args.json:
@@ -124,6 +158,11 @@ def main(argv: list[str] | None = None) -> int:
         Path(args.output).write_text(body + "\n", encoding="utf-8")
     else:
         print(body)
+
+    try:
+        _write_run_log(_default_run_log_path(), body)
+    except OSError as exc:
+        print(f"Warning: could not write run log: {exc}", file=sys.stderr)
 
     if report.attack_indicators():
         return 2

@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from .allowlist import is_allowlisted
@@ -72,6 +73,31 @@ def _parse_host(line: str) -> str | None:
     return m.group(1) if m else None
 
 
+def _parse_line_date(line: str, *, reference: date) -> date | None:
+    iso_match = re.match(r"^(\d{4}-\d{2}-\d{2})", line)
+    if iso_match:
+        try:
+            return datetime.strptime(iso_match.group(1), "%Y-%m-%d").date()
+        except ValueError:
+            return None
+
+    syslog_match = re.match(r"^([A-Z][a-z]{2})\s+(\d{1,2})\s+\d{2}:\d{2}:\d{2}", line)
+    if not syslog_match:
+        return None
+
+    try:
+        parsed = datetime.strptime(
+            f"{reference.year} {syslog_match.group(1)} {int(syslog_match.group(2))}",
+            "%Y %b %d",
+        ).date()
+    except ValueError:
+        return None
+
+    if parsed > reference + timedelta(days=1):
+        parsed = parsed.replace(year=parsed.year - 1)
+    return parsed
+
+
 def _message_body(line: str) -> str:
     """Normalize a log line for deduplication (strip timestamp, host, PID noise)."""
     body = re.sub(r"^\S+\s+\S+\s+", "", line)
@@ -97,6 +123,7 @@ def analyze_paths(
     include_info: bool = False,
     min_severity: str = "low",
     allowlist_patterns: list[str] | None = None,
+    since: date | None = None,
 ) -> AnalysisReport:
     report = AnalysisReport()
     min_rank = SEVERITY_ORDER[min_severity]
@@ -123,6 +150,10 @@ def analyze_paths(
         for i, line in enumerate(lines, start=1):
             line = line.rstrip()
             if not line:
+                continue
+
+            line_date = _parse_line_date(line, reference=date.today())
+            if since and line_date and line_date < since:
                 continue
 
             ts = _parse_timestamp(line)
