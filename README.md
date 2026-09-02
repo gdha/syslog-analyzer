@@ -48,7 +48,19 @@ python3 -m syslog_analyzer --min-severity high
 
 # Include successful SSH logins and sudo commands
 python3 -m syslog_analyzer --include-info
+
+# Analyze only entries from today
+python3 -m syslog_analyzer --since today
+
+# Analyze only entries since a specific date
+python3 -m syslog_analyzer --since 2026-09-01
 ```
+
+Each run is also appended to a daily run log at:
+
+`/var/log/syslog-analyzer-YYYY-MM-DD`
+
+If `/var/log` is not writable, it falls back to `./syslog-analyzer-YYYY-MM-DD`.
 
 ## False-positive suppression (allowlist)
 
