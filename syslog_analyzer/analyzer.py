@@ -5,15 +5,10 @@ from __future__ import annotations
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-<<<<<<< HEAD
 from datetime import datetime, timezone
-=======
-from datetime import date, datetime, timedelta
->>>>>>> 16e3676e89c86ad86ff272fa655001a247d2802a
 from pathlib import Path
 from typing import Sequence
 
-from .allowlist import is_allowlisted
 from .logs import default_log_paths, read_log_lines
 from .patterns import (
     SEVERITY_ORDER,
@@ -25,27 +20,26 @@ from .patterns import (
 )
 
 
-# Ordered list of timestamp formats tried when parsing log lines.
-# Each entry is (strptime_format, has_timezone_info).
+# ------------------------------------------------------------------ #
+# Timestamp parsing helpers                                           #
+# ------------------------------------------------------------------ #
+
+# Ordered list of strptime formats tried for ISO-8601 strings.
 _TS_FORMATS: list[tuple[str, bool]] = [
-    # ISO-8601 with timezone offset, e.g. 2026-09-02T06:04:25.123456+02:00
-    ("%Y-%m-%dT%H:%M:%S.%f%z", True),
-    # ISO-8601 without fractional seconds, e.g. 2026-09-02T06:04:25+02:00
-    ("%Y-%m-%dT%H:%M:%S%z", True),
-    # syslog RFC3164 with year, e.g. Sep 02 06:04:25  (no year — handled specially)
-    # Traditional syslog without year, e.g. "Sep  2 06:04:25"
+    ("%Y-%m-%dT%H:%M:%S.%f%z", True),   # 2026-09-02T06:04:25.123456+02:00
+    ("%Y-%m-%dT%H:%M:%S%z", True),       # 2026-09-02T06:04:25+02:00
 ]
 
-# Regex that captures the timestamp portion from common log formats.
+# Captures the timestamp from any of the three log flavours we care about.
 _TS_RE = re.compile(
     r"""
-    # ISO-8601
+    # ISO-8601 (with optional fractional seconds and optional tz offset)
     (?P<iso>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}:\d{2}|Z)?)
     |
-    # server-monitor style: [Wed Sep  2 06:03:06 AM CEST 2026]
-    \[(?P<dow>\w+)\s+(?P<mon2>\w+)\s+(?P<day2>\s*\d+)\s+(?P<hms2>\d{2}:\d{2}:\d{2})\s+(?P<ampm>AM|PM)\s+\w+\s+(?P<yr2>\d{4})\]
+    # server-monitor: [Wed Sep  2 06:03:06 AM CEST 2026]
+    \[(?:\w+)\s+(?P<mon2>\w+)\s+(?P<day2>\s*\d+)\s+(?P<hms2>\d{2}:\d{2}:\d{2})\s+(?P<ampm>AM|PM)\s+\w+\s+(?P<yr2>\d{4})\]
     |
-    # Traditional syslog without year: Sep  2 06:04:25  (assume current year)
+    # Traditional syslog without year: Sep  2 06:04:25
     (?P<mon>\w{3})\s+(?P<day>\s*\d+)\s+(?P<hms>\d{2}:\d{2}:\d{2})
     """,
     re.VERBOSE,
@@ -58,7 +52,7 @@ _MONTH_MAP = {
 
 
 def _extract_datetime(line: str, ref_year: int = 2026) -> datetime | None:
-    """Parse the first recognisable timestamp in *line* and return a timezone-aware datetime."""
+    """Return a timezone-aware datetime for the first timestamp found in *line*."""
     m = _TS_RE.search(line)
     if not m:
         return None
@@ -76,13 +70,12 @@ def _extract_datetime(line: str, ref_year: int = 2026) -> datetime | None:
         return None
 
     if m.group("mon2"):
-        # server-monitor format: Wed Sep  2 06:03:06 AM CEST 2026
+        # server-monitor: [Wed Sep  2 06:03:06 AM CEST 2026]
         mon = _MONTH_MAP.get(m.group("mon2"), 0)
         day = int(m.group("day2").strip())
         yr = int(m.group("yr2"))
-        hms = m.group("hms2")
+        hh, mm, ss = map(int, m.group("hms2").split(":"))
         ampm = m.group("ampm")
-        hh, mm, ss = map(int, hms.split(":"))
         if ampm == "PM" and hh != 12:
             hh += 12
         elif ampm == "AM" and hh == 12:
@@ -92,26 +85,83 @@ def _extract_datetime(line: str, ref_year: int = 2026) -> datetime | None:
         except ValueError:
             return None
 
-    # Traditional syslog without year
+    # Traditional syslog without year: Sep  2 06:04:25
     mon = _MONTH_MAP.get(m.group("mon"), 0)
-    day = int(m.group("day").strip())
-    hh, mm, ss = map(int, m.group("hms").split(":"))
     if mon == 0:
         return None
+    day = int(m.group("day").strip())
+    hh, mm, ss = map(int, m.group("hms").split(":"))
     try:
         return datetime(ref_year, mon, day, hh, mm, ss, tzinfo=timezone.utc)
     except ValueError:
         return None
 
 
+# ------------------------------------------------------------------ #
+# Gap detection                                                       #
+# ------------------------------------------------------------------ #
+
+_SHUTDOWN_RE = re.compile(
+    r"systemd-logind.*Power(?:ing off|ing down)"
+    r"|systemd\[1\].*Reached target.*poweroff"
+    r"|systemd-journald.*Journal stopped"
+    r"|Power key pressed"
+    r"|Shutting down\.",
+    re.I,
+)
+_BOOT_RE = re.compile(
+    r"kernel:.*Linux version"
+    r"|kernel:.*BIOS-provided"
+    r"|systemd\[1\].*Reached target.*basic\.target",
+    re.I,
+)
+_MONITOR_UNREACHABLE_RE = re.compile(
+    r"Monitor unreachable"
+    r"|HTTP 000"
+    r"|Could not fetch.*monitor",
+    re.I,
+)
+_NET_FAILURE_RE = re.compile(
+    r"Network is unreachable"
+    r"|Temporary failure in name resolution",
+    re.I,
+)
+
+
+def _guess_gap_cause(
+    lines_before: Sequence[str],
+    lines_after: Sequence[str],
+) -> str:
+    """Heuristically identify why a log gap occurred."""
+    ctx_before = list(lines_before[-200:])
+    ctx_after = list(lines_after[:200])
+
+    has_shutdown = any(_SHUTDOWN_RE.search(l) for l in ctx_before)
+    has_boot = any(_BOOT_RE.search(l) for l in ctx_after)
+    has_monitor_err = any(_MONITOR_UNREACHABLE_RE.search(l) for l in ctx_before)
+    has_net_err = any(_NET_FAILURE_RE.search(l) for l in ctx_before)
+
+    if has_shutdown and has_boot:
+        return "system reboot / power-off (shutdown + boot sequence detected)"
+    if has_shutdown:
+        return "system shutdown (poweroff detected; no subsequent boot in this log)"
+    if has_boot:
+        return "system reboot (boot sequence detected; no preceding shutdown in this log)"
+    if has_monitor_err:
+        return "monitoring agent lost connectivity (HTTP 000 / monitor unreachable)"
+    if has_net_err:
+        return "network failure (DNS or connectivity errors detected)"
+    return "unknown — no surrounding context matched a known cause"
+
+
 @dataclass(frozen=True)
 class LogGap:
     """A detected silence / interruption in the log stream."""
-    source: str          # log file where the gap was detected
-    gap_start: str       # last timestamp before the gap (ISO string)
-    gap_end: str         # first timestamp after the gap (ISO string)
+    source: str                 # log file where the gap was found
+    gap_start: str              # last log line before the gap (truncated)
+    gap_end: str                # first log line after the gap (truncated)
     duration_seconds: float
-    likely_cause: str    # human-readable best-guess reason
+    likely_cause: str
 
     @property
     def duration_human(self) -> str:
@@ -125,6 +175,53 @@ class LogGap:
         return f"{s}s"
 
 
+def detect_gaps(
+    lines: list[str],
+    source: str,
+    *,
+    threshold_seconds: float = 300,
+    ref_year: int = 2026,
+) -> list[LogGap]:
+    """Return all timestamp gaps in *lines* that exceed *threshold_seconds*.
+
+    Timestamps are parsed from ISO-8601, traditional syslog, and the
+    server-monitor bracket format.  Non-parseable lines are skipped.
+    """
+    gaps: list[LogGap] = []
+    prev_dt: datetime | None = None
+    prev_line: str = ""
+    prev_idx: int = 0
+
+    for i, line in enumerate(lines):
+        dt = _extract_datetime(line, ref_year=ref_year)
+        if dt is None:
+            continue
+
+        if prev_dt is not None:
+            delta = (dt - prev_dt).total_seconds()
+            if delta > threshold_seconds:
+                cause = _guess_gap_cause(lines[: prev_idx + 1], lines[i:])
+                gaps.append(
+                    LogGap(
+                        source=source,
+                        gap_start=prev_line[:120],
+                        gap_end=line.strip()[:120],
+                        duration_seconds=delta,
+                        likely_cause=cause,
+                    )
+                )
+
+        prev_dt = dt
+        prev_line = line.strip()
+        prev_idx = i
+
+    return gaps
+
+
+# ------------------------------------------------------------------ #
+# Core dataclasses                                                    #
+# ------------------------------------------------------------------ #
+
 @dataclass
 class AnalysisReport:
     sources: list[str] = field(default_factory=list)
@@ -135,10 +232,6 @@ class AnalysisReport:
     security: list[Match] = field(default_factory=list)
     unreadable: list[str] = field(default_factory=list)
     gaps: list[LogGap] = field(default_factory=list)
-
-    # ------------------------------------------------------------------ #
-    # Properties                                                          #
-    # ------------------------------------------------------------------ #
 
     @property
     def serious_by_category(self) -> dict[str, list[Match]]:
@@ -173,6 +266,10 @@ class AnalysisReport:
         return [m for m in self.security if m.category in attack_cats]
 
 
+# ------------------------------------------------------------------ #
+# Internal helpers                                                    #
+# ------------------------------------------------------------------ #
+
 def _parse_timestamp(line: str) -> str | None:
     m = re.match(r"^(\S+)", line)
     return m.group(1) if m else None
@@ -183,134 +280,8 @@ def _parse_host(line: str) -> str | None:
     return m.group(1) if m else None
 
 
-<<<<<<< HEAD
-# ------------------------------------------------------------------ #
-# Shutdown / reboot pattern matchers for gap cause detection          #
-# ------------------------------------------------------------------ #
-_SHUTDOWN_RE = re.compile(
-    r"systemd-logind.*Power(?:ing off|ing down)"
-    r"|systemd\[1\].*Reached target.*poweroff"
-    r"|systemd-journald.*Journal stopped"
-    r"|shutdown.*now"
-    r"|reboot.*now",
-    re.I,
-)
-_BOOT_RE = re.compile(
-    r"kernel:.*Linux version"
-    r"|systemd\[1\].*Starting.*systemd"
-    r"|kernel:.*BIOS-provided",
-    re.I,
-)
-_MONITOR_UNREACHABLE_RE = re.compile(
-    r"Monitor unreachable"
-    r"|HTTP 000"
-    r"|Could not fetch.*monitor",
-    re.I,
-)
-_NET_FAILURE_RE = re.compile(
-    r"Network is unreachable"
-    r"|Temporary failure in name resolution"
-    r"|connect.*failed",
-    re.I,
-)
-
-
-def _guess_gap_cause(
-    lines_before: Sequence[str],
-    lines_after: Sequence[str],
-) -> str:
-    """Heuristically determine why a log gap occurred."""
-    # Look at up to 200 lines on each side
-    context_before = lines_before[-200:] if len(lines_before) > 200 else lines_before
-    context_after = lines_after[:200] if len(lines_after) > 200 else lines_after
-
-    has_shutdown = any(_SHUTDOWN_RE.search(l) for l in context_before)
-    has_boot = any(_BOOT_RE.search(l) for l in context_after)
-    has_monitor_err = any(_MONITOR_UNREACHABLE_RE.search(l) for l in context_before)
-    has_net_err = any(_NET_FAILURE_RE.search(l) for l in context_before)
-
-    if has_shutdown and has_boot:
-        return "system reboot / power-off (shutdown + boot sequence detected)"
-    if has_shutdown:
-        return "system shutdown (poweroff detected, no subsequent boot seen in this log)"
-    if has_boot:
-        return "system reboot (boot sequence detected, no preceding shutdown seen in this log)"
-    if has_monitor_err:
-        return "monitoring agent lost connectivity (HTTP 000 / monitor unreachable)"
-    if has_net_err:
-        return "network failure (DNS or connectivity errors detected)"
-    return "unknown — no surrounding context matched a known cause"
-
-
-def detect_gaps(
-    lines: list[str],
-    source: str,
-    *,
-    threshold_seconds: float = 300,
-    ref_year: int = 2026,
-) -> list[LogGap]:
-    """Scan *lines* for timestamp gaps larger than *threshold_seconds*.
-
-    Returns a list of :class:`LogGap` objects ordered chronologically.
-    """
-    gaps: list[LogGap] = []
-    prev_dt: datetime | None = None
-    prev_ts_str: str = ""
-    prev_index: int = 0
-
-    for i, line in enumerate(lines):
-        dt = _extract_datetime(line, ref_year=ref_year)
-        if dt is None:
-            continue
-
-        if prev_dt is not None:
-            delta = (dt - prev_dt).total_seconds()
-            if delta > threshold_seconds:
-                cause = _guess_gap_cause(lines[:prev_index + 1], lines[i:])
-                gaps.append(
-                    LogGap(
-                        source=source,
-                        gap_start=prev_ts_str,
-                        gap_end=line.strip()[:120],
-                        duration_seconds=delta,
-                        likely_cause=cause,
-                    )
-                )
-
-        prev_dt = dt
-        prev_ts_str = line.strip()[:120]
-        prev_index = i
-
-    return gaps
-=======
-def _parse_line_date(line: str, *, reference: date) -> date | None:
-    iso_match = re.match(r"^(\d{4}-\d{2}-\d{2})", line)
-    if iso_match:
-        try:
-            return datetime.strptime(iso_match.group(1), "%Y-%m-%d").date()
-        except ValueError:
-            return None
-
-    syslog_match = re.match(r"^([A-Z][a-z]{2})\s+(\d{1,2})\s+\d{2}:\d{2}:\d{2}", line)
-    if not syslog_match:
-        return None
-
-    try:
-        parsed = datetime.strptime(
-            f"{reference.year} {syslog_match.group(1)} {int(syslog_match.group(2))}",
-            "%Y %b %d",
-        ).date()
-    except ValueError:
-        return None
-
-    if parsed > reference + timedelta(days=1):
-        parsed = parsed.replace(year=parsed.year - 1)
-    return parsed
->>>>>>> 16e3676e89c86ad86ff272fa655001a247d2802a
-
-
 def _message_body(line: str) -> str:
-    """Normalize a log line for deduplication (strip timestamp, host, PID noise)."""
+    """Normalise a log line for deduplication (strip timestamp, host, PID noise)."""
     body = re.sub(r"^\S+\s+\S+\s+", "", line)
     body = re.sub(r"\[\d+\]", "[PID]", body)
     return body
@@ -328,19 +299,35 @@ def _update_time_range(report: AnalysisReport, timestamp: str) -> None:
     report.time_range = (start, end)
 
 
+# ------------------------------------------------------------------ #
+# Public API                                                          #
+# ------------------------------------------------------------------ #
+
 def analyze_paths(
     paths: list[str | Path],
     *,
     include_info: bool = False,
     min_severity: str = "low",
-    allowlist_patterns: list[str] | None = None,
-    since: date | None = None,
+    gap_threshold: float = 300,
 ) -> AnalysisReport:
+    """Analyse *paths* and return an :class:`AnalysisReport`.
+
+    Parameters
+    ----------
+    paths:
+        List of log files to scan.
+    include_info:
+        If ``True``, include informational security events (e.g. accepted logins).
+    min_severity:
+        Ignore events below this severity level.
+    gap_threshold:
+        Minimum silence in seconds that is reported as a :class:`LogGap`.
+        Set to ``0`` to disable gap detection.
+    """
     report = AnalysisReport()
     min_rank = SEVERITY_ORDER[min_severity]
-    seen_serious: set[tuple[str, str, str]] = set()
-    seen_security: set[tuple[str, str, str]] = set()
-    user_allowlist = allowlist_patterns or []
+    seen_serious: set[tuple[str, str]] = set()
+    seen_security: set[tuple[str, str]] = set()
 
     for raw_path in paths:
         path = Path(raw_path)
@@ -358,13 +345,15 @@ def analyze_paths(
         source = path.name
         report.total_lines += len(lines)
 
+        # --- Gap detection ---
+        if gap_threshold > 0:
+            file_gaps = detect_gaps(lines, source, threshold_seconds=gap_threshold)
+            report.gaps.extend(file_gaps)
+
+        # --- Error / security scanning ---
         for i, line in enumerate(lines, start=1):
             line = line.rstrip()
             if not line:
-                continue
-
-            line_date = _parse_line_date(line, reference=date.today())
-            if since and line_date and line_date < since:
                 continue
 
             ts = _parse_timestamp(line)
@@ -374,10 +363,6 @@ def analyze_paths(
             host = _parse_host(line)
             if host and report.host is None:
                 report.host = host
-
-            # Skip lines matched by user allowlist
-            if user_allowlist and is_allowlisted(line, user_allowlist):
-                continue
 
             serious_hit = _first_match(line, SERIOUS_PATTERNS)
             if serious_hit:
@@ -407,6 +392,7 @@ def analyze_paths(
 
     report.serious.sort(key=lambda m: (SEVERITY_ORDER[m.severity], m.source, m.line_number))
     report.security.sort(key=lambda m: (SEVERITY_ORDER[m.severity], m.source, m.line_number))
+    report.gaps.sort(key=lambda g: g.duration_seconds, reverse=True)
     return report
 
 

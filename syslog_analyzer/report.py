@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections import Counter
 
-from .analyzer import AnalysisReport, apparmor_profile_summary
+from .analyzer import AnalysisReport, LogGap, apparmor_profile_summary
 from .patterns import SEVERITY_ORDER
 
 
@@ -17,6 +17,34 @@ def _severity_icon(severity: str) -> str:
         "low": "[~]",
         "info": "[i]",
     }.get(severity, "[?]")
+
+
+def _format_gaps_section(gaps: list[LogGap], *, max_shown: int = 20) -> list[str]:
+    """Return lines for the LOG GAPS section of the text report."""
+    lines: list[str] = []
+    sep = "=" * 72
+    lines.append("")
+    lines.append(sep)
+    lines.append("LOG GAPS (silence / interruptions detected)")
+    lines.append(sep)
+
+    if not gaps:
+        lines.append("(none above threshold)")
+        return lines
+
+    # Sort by duration descending so the most impactful gap is first.
+    shown = sorted(gaps, key=lambda g: g.duration_seconds, reverse=True)[:max_shown]
+    for g in shown:
+        lines.append(f"\n  ⏸  Duration : {g.duration_human}  ({g.duration_seconds:,.0f} s)")
+        lines.append(f"     Source   : {g.source}")
+        lines.append(f"     Cause    : {g.likely_cause}")
+        lines.append(f"     Last seen: {g.gap_start}")
+        lines.append(f"     Resumed  : {g.gap_end}")
+
+    if len(gaps) > max_shown:
+        lines.append(f"\n  … and {len(gaps) - max_shown} more gap(s) not shown.")
+
+    return lines
 
 
 def format_text(report: AnalysisReport, *, max_per_category: int = 10) -> str:
@@ -102,6 +130,8 @@ def format_text(report: AnalysisReport, *, max_per_category: int = 10) -> str:
             for profile, count in apparmor_profile_summary(aa)[:12]:
                 lines.append(f"  {profile}: {count}")
 
+    lines.extend(_format_gaps_section(report.gaps))
+
     lines.append("")
     lines.append(sep)
     highest = report.highest_serious_severity()
@@ -109,6 +139,11 @@ def format_text(report: AnalysisReport, *, max_per_category: int = 10) -> str:
         lines.append(f"Overall: REVIEW RECOMMENDED (highest serious severity: {highest})")
     elif attacks:
         lines.append("Overall: SECURITY REVIEW RECOMMENDED")
+    elif report.gaps:
+        lines.append(
+            f"Overall: {len(report.gaps)} log gap(s) detected "
+            f"(longest: {sorted(report.gaps, key=lambda g: g.duration_seconds, reverse=True)[0].duration_human})"
+        )
     else:
         lines.append("Overall: No critical issues detected in scanned logs.")
     lines.append(sep)
@@ -123,6 +158,17 @@ def format_json(report: AnalysisReport) -> str:
         "sources": report.sources,
         "total_lines": report.total_lines,
         "unreadable": report.unreadable,
+        "gaps": [
+            {
+                "source": g.source,
+                "duration_seconds": g.duration_seconds,
+                "duration_human": g.duration_human,
+                "gap_start": g.gap_start,
+                "gap_end": g.gap_end,
+                "likely_cause": g.likely_cause,
+            }
+            for g in sorted(report.gaps, key=lambda g: g.duration_seconds, reverse=True)
+        ],
         "attack_indicators": [
             {"source": m.source, "line": m.line_number, "category": m.category, "severity": m.severity, "text": m.line}
             for m in report.attack_indicators()

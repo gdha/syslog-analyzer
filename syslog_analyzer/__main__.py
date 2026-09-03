@@ -4,55 +4,16 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from syslog_analyzer.allowlist import (
-    DEFAULT_ALLOWLIST_PATH,
-    init_allowlist,
-    load_allowlist,
-)
-from syslog_analyzer.analyzer import analyze_paths
-from syslog_analyzer.logs import default_log_paths, resolve_log_paths
-from syslog_analyzer.patterns import DEFAULT_LOG_PATHS
-from syslog_analyzer.report import format_json, format_text
-
-
-def _parse_since(value: str) -> date:
-    lowered = value.lower()
-    if lowered == "today":
-        return date.today()
-    if lowered == "yesterday":
-        return date.today() - timedelta(days=1)
-    try:
-        return datetime.strptime(value, "%Y-%m-%d").date()
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError(
-            "--since must be 'today', 'yesterday', or in YYYY-MM-DD format"
-        ) from exc
-
-
-def _default_run_log_path() -> Path:
-    return Path(f"/var/log/syslog-analyzer-{date.today():%F}")
-
-
-def _write_run_log(path: Path, body: str) -> Path:
-    stamp = datetime.now().isoformat(timespec="seconds")
-    for candidate in (path, Path.cwd() / path.name):
-        try:
-            with candidate.open("a", encoding="utf-8") as fh:
-                fh.write(f"\n=== {stamp} ===\n")
-                fh.write(body)
-                fh.write("\n")
-            return candidate
-        except OSError:
-            continue
-    raise OSError(f"Could not write run log to {path} or {Path.cwd() / path.name}")
+from .analyzer import analyze_paths
+from .logs import default_log_paths, resolve_log_paths
+from .patterns import DEFAULT_LOG_PATHS
+from .report import format_json, format_text
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="syslog-analyzer",
         description="Scan system logs for serious errors and security-related activity.",
     )
     parser.add_argument(
@@ -101,38 +62,17 @@ def main(argv: list[str] | None = None) -> int:
         help="Limit rotated archives per log (e.g. 2 → active + .1 + .2.gz)",
     )
     parser.add_argument(
-        "--allowlist",
-        metavar="FILE",
-        default=None,
+        "--gap-threshold",
+        type=float,
+        default=300,
+        metavar="SECONDS",
         help=(
-            "Path to a custom allowlist file with suppression patterns "
-            f"(default: {DEFAULT_ALLOWLIST_PATH})"
+            "Report log silences longer than this many seconds as gaps (default: 300). "
+            "Set to 0 to disable gap detection."
         ),
-    )
-    parser.add_argument(
-        "--allowlist-init",
-        action="store_true",
-        help="Create the default allowlist file with example content, then exit",
-    )
-    parser.add_argument(
-        "--since",
-        type=_parse_since,
-        metavar="WHEN",
-        help="Analyze only entries since: today, yesterday, or YYYY-MM-DD",
     )
 
     args = parser.parse_args(argv)
-
-    # Handle --allowlist-init early exit
-    if args.allowlist_init:
-        created = init_allowlist()
-        print(f"Allowlist file ready at: {created}")
-        return 0
-
-    # Load user allowlist patterns
-    allowlist_path = Path(args.allowlist) if args.allowlist else None
-    allowlist_patterns = load_allowlist(allowlist_path)
-
     include_rotated = not args.no_rotated
 
     if args.paths:
@@ -151,8 +91,7 @@ def main(argv: list[str] | None = None) -> int:
         paths,
         include_info=args.include_info,
         min_severity=args.min_severity,
-        allowlist_patterns=allowlist_patterns,
-        since=args.since,
+        gap_threshold=args.gap_threshold,
     )
 
     if args.json:
@@ -165,19 +104,11 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(body)
 
-    try:
-        written_path = _write_run_log(_default_run_log_path(), body)
-        if written_path.parent != Path("/var/log"):
-            print(
-                f"Warning: /var/log not writable, wrote run log to {written_path}",
-                file=sys.stderr,
-            )
-    except OSError as exc:
-        print(f"Warning: could not write run log: {exc}", file=sys.stderr)
-
     if report.attack_indicators():
         return 2
     if report.highest_serious_severity() in ("critical", "high"):
+        return 1
+    if report.gaps:
         return 1
     return 0
 
