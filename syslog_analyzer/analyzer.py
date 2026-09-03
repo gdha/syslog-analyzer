@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Sequence
 
@@ -299,6 +299,31 @@ def _update_time_range(report: AnalysisReport, timestamp: str) -> None:
     report.time_range = (start, end)
 
 
+def _parse_line_date(line: str, *, reference: date) -> date | None:
+    iso_match = re.match(r"^(\d{4}-\d{2}-\d{2})", line)
+    if iso_match:
+        try:
+            return datetime.strptime(iso_match.group(1), "%Y-%m-%d").date()
+        except ValueError:
+            return None
+
+    syslog_match = re.match(r"^([A-Z][a-z]{2})\s+(\d{1,2})\s+\d{2}:\d{2}:\d{2}", line)
+    if not syslog_match:
+        return None
+
+    try:
+        parsed = datetime.strptime(
+            f"{reference.year} {syslog_match.group(1)} {int(syslog_match.group(2))}",
+            "%Y %b %d",
+        ).date()
+    except ValueError:
+        return None
+
+    if parsed > reference + timedelta(days=1):
+        parsed = parsed.replace(year=parsed.year - 1)
+    return parsed
+
+
 # ------------------------------------------------------------------ #
 # Public API                                                          #
 # ------------------------------------------------------------------ #
@@ -309,6 +334,7 @@ def analyze_paths(
     include_info: bool = False,
     min_severity: str = "low",
     gap_threshold: float = 300,
+    since: date | None = None,
 ) -> AnalysisReport:
     """Analyse *paths* and return an :class:`AnalysisReport`.
 
@@ -345,15 +371,32 @@ def analyze_paths(
         source = path.name
         report.total_lines += len(lines)
 
+        # --- Date filtering ---
+        reference_date = date.today()
+
+        def _in_since_scope(raw_line: str) -> bool:
+            if not since:
+                return True
+            line_date = _parse_line_date(raw_line, reference=reference_date)
+            return not line_date or line_date >= since
+
         # --- Gap detection ---
         if gap_threshold > 0:
-            file_gaps = detect_gaps(lines, source, threshold_seconds=gap_threshold)
+            gap_lines = [line for line in lines if _in_since_scope(line)]
+            file_gaps = detect_gaps(
+                gap_lines,
+                source,
+                threshold_seconds=gap_threshold,
+                ref_year=reference_date.year,
+            )
             report.gaps.extend(file_gaps)
 
         # --- Error / security scanning ---
         for i, line in enumerate(lines, start=1):
             line = line.rstrip()
             if not line:
+                continue
+            if not _in_since_scope(line):
                 continue
 
             ts = _parse_timestamp(line)
