@@ -5,10 +5,15 @@ from __future__ import annotations
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
+<<<<<<< HEAD
 from datetime import datetime, timezone
+=======
+from datetime import date, datetime, timedelta
+>>>>>>> 16e3676e89c86ad86ff272fa655001a247d2802a
 from pathlib import Path
 from typing import Sequence
 
+from .allowlist import is_allowlisted
 from .logs import default_log_paths, read_log_lines
 from .patterns import (
     SEVERITY_ORDER,
@@ -178,6 +183,7 @@ def _parse_host(line: str) -> str | None:
     return m.group(1) if m else None
 
 
+<<<<<<< HEAD
 # ------------------------------------------------------------------ #
 # Shutdown / reboot pattern matchers for gap cause detection          #
 # ------------------------------------------------------------------ #
@@ -276,6 +282,31 @@ def detect_gaps(
         prev_index = i
 
     return gaps
+=======
+def _parse_line_date(line: str, *, reference: date) -> date | None:
+    iso_match = re.match(r"^(\d{4}-\d{2}-\d{2})", line)
+    if iso_match:
+        try:
+            return datetime.strptime(iso_match.group(1), "%Y-%m-%d").date()
+        except ValueError:
+            return None
+
+    syslog_match = re.match(r"^([A-Z][a-z]{2})\s+(\d{1,2})\s+\d{2}:\d{2}:\d{2}", line)
+    if not syslog_match:
+        return None
+
+    try:
+        parsed = datetime.strptime(
+            f"{reference.year} {syslog_match.group(1)} {int(syslog_match.group(2))}",
+            "%Y %b %d",
+        ).date()
+    except ValueError:
+        return None
+
+    if parsed > reference + timedelta(days=1):
+        parsed = parsed.replace(year=parsed.year - 1)
+    return parsed
+>>>>>>> 16e3676e89c86ad86ff272fa655001a247d2802a
 
 
 def _message_body(line: str) -> str:
@@ -302,11 +333,14 @@ def analyze_paths(
     *,
     include_info: bool = False,
     min_severity: str = "low",
+    allowlist_patterns: list[str] | None = None,
+    since: date | None = None,
 ) -> AnalysisReport:
     report = AnalysisReport()
     min_rank = SEVERITY_ORDER[min_severity]
     seen_serious: set[tuple[str, str, str]] = set()
     seen_security: set[tuple[str, str, str]] = set()
+    user_allowlist = allowlist_patterns or []
 
     for raw_path in paths:
         path = Path(raw_path)
@@ -329,6 +363,10 @@ def analyze_paths(
             if not line:
                 continue
 
+            line_date = _parse_line_date(line, reference=date.today())
+            if since and line_date and line_date < since:
+                continue
+
             ts = _parse_timestamp(line)
             if ts:
                 _update_time_range(report, ts)
@@ -336,6 +374,10 @@ def analyze_paths(
             host = _parse_host(line)
             if host and report.host is None:
                 report.host = host
+
+            # Skip lines matched by user allowlist
+            if user_allowlist and is_allowlisted(line, user_allowlist):
+                continue
 
             serious_hit = _first_match(line, SERIOUS_PATTERNS)
             if serious_hit:

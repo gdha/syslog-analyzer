@@ -8,25 +8,62 @@ from typing import Callable
 
 # Lines matching any of these are excluded from serious-error matching.
 BENIGN_PATTERNS: list[str] = [
+    # --- systemd lifecycle (normal operation) ---
     r"Deactivated successfully",
     r"Finished .* successfully",
     r"^.* systemd\[\d+\]: Started ",
     r"^.* systemd\[\d+\]: Stopping ",
+    r"^.* systemd\[\d+\]: Reached target ",
+    r"^.* systemd\[\d+\]: Listening on ",
+    r"^.* systemd\[\d+\]: Mounted ",
+    r"^.* systemd\[\d+\]: Condition check resulted in .* being skipped",
+    r"systemd.*: .* scheduled restart job",
+    # --- dmesg / kernel severity keywords in informational context ---
+    r"printk: \d+ messages suppressed",
+    r"kern\.(?:crit|alert|emerg).*forwarded",  # log forwarding config
+    r"priority=(?:crit|alert|emerg).*rotated",  # logrotate referencing priority
+    r"loglevel=|log_level=|LogLevel=",  # config lines mentioning severity
+    r"set.*(?:crit|critical|alert|emerg).*threshold",  # threshold configuration
+    r"severity.*(?:crit|critical|alert|emerg).*configured",  # severity config
+    r"dmesg.*--level|dmesg.*--facility",  # dmesg command invocations
+    r"rsyslog.*action.*crit|syslog-ng.*filter.*crit",  # syslog daemon config
+    # --- routine process signals / HUPs ---
     r"was HUPed",
+    r"Reloading configuration",
+    r"received SIGHUP.*reloading",
+    # --- AppArmor housekeeping ---
     r"profile_replace.*same as current profile",
     r'apparmor="STATUS"',
     r"kauditd_printk_skb.*suppressed",
     r"type=1326 audit",  # seccomp — routine snap confinement
+    # --- hardware / graphics benign ---
     r"/etc/vulkan/",
     r"product_sku",
+    r"Errors from xkbcomp are not fatal",
+    # --- D-Bus normal activity ---
     r"dbus_method_call.*timedate1",
     r"dbus_signal.*login1",
-    r"Errors from xkbcomp are not fatal",
+    # --- API / service deprecation notices (not errors) ---
     r"DEPRECATED_ENDPOINT",
     r"QUOTA_EXCEEDED",
     r"Initializing extension SECURITY",
+    # --- session lifecycle (informational) ---
     r"session opened for user",
+    r"session closed for user",
     r"New session .* of user",
+    r"Removed session",
+    # --- package manager normal output (contains 'error' keyword in paths) ---
+    r"(?:dnf|yum|apt).*(?:Importing|Verifying|Running).*",
+    r"hawkey.*repo.*error.*skipping",  # repo metadata warnings in hawkey
+    # --- monitoring agent benign messages ---
+    r"telegraf.*(?:Gathered|Connected|Loaded)",
+    r"fluent-bit.*(?:\[info\]|\[notice\])",
+    # --- cron / timer normal scheduling ---
+    r"CRON\[\d+\]:.*\(.*\) CMD ",
+    r"anacron.*Updated timestamp",
+    # --- network manager informational ---
+    r"NetworkManager.*state change.*connected",
+    r"NetworkManager.*policy.*set .* default",
 ]
 
 SERIOUS_PATTERNS: list[tuple[str, str, str]] = [
@@ -79,6 +116,14 @@ DEFAULT_LOG_PATHS: list[str] = [
     # RHEL / CentOS / Fedora
     "/var/log/messages",
     "/var/log/secure",
+    # Package manager logs
+    "/var/log/dnf.log",
+    "/var/log/dnf.rpm.log",
+    # Monitoring / log collectors
+    "/var/log/telegraf/telegraf.log",
+    "/var/log/fluent-bit/fluent-bit.log",
+    # Miscellaneous system logs
+    "/var/log/hawkey.log",
 ]
 
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
